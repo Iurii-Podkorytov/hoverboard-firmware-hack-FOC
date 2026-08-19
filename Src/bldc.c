@@ -96,6 +96,25 @@ static int16_t hallTickDirection(int16_t prev, int16_t curr) {
   static const uint16_t dir_lut[6] = {0, -1, -2, 0, 2, 1};
   return dir_lut[hallTickModulo(prev - curr, 6)];
 }
+
+/* Accumulate a tick delta into a FREE-RUNNING int16 counter.
+ *
+ * These counters used to wrap at 9000 (hallTickModulo(..., 9000)), which
+ * silently broke the consumer: mainboard_fw computes per-frame deltas as
+ * (int16_t)(curr - prev) and relies on two's-complement wraparound to stay
+ * correct across the counter rolling over. That reasoning only holds for a
+ * counter spanning the FULL int16 range - with a mod-9000 counter, the
+ * 8999 -> 0 rollover produced a delta of -8999 and a ~628 rad position jump
+ * every 100 wheel revolutions.
+ *
+ * Wrapping over the full uint16 range instead makes the consumer's
+ * assumption true. The arithmetic is done in uint16_t because signed
+ * overflow is undefined behaviour in C; unsigned wraparound is well-defined
+ * and the round-trip back to int16_t is what the consumer expects.
+ */
+static int16_t hallTickAccum(int16_t counter, int16_t delta) {
+  return (int16_t)((uint16_t)counter + (uint16_t)delta);
+}
 #endif
 
 // =================================
@@ -149,7 +168,6 @@ void DMA1_Channel1_IRQHandler(void) {
 
   // Create square wave for buzzer and more
   buzzerTimer++;
-#ifdef BUZZER_ENABLED
   if (buzzerFreq != 0 && (buzzerTimer / 5000) % (buzzerPattern + 1) == 0) {
     if (buzzerPrev == 0) {
       buzzerPrev = 1;
@@ -164,7 +182,6 @@ void DMA1_Channel1_IRQHandler(void) {
       HAL_GPIO_WritePin(BUZZER_PORT, BUZZER_PIN, GPIO_PIN_RESET);
       buzzerPrev = 0;
   }
-#endif
 
   // Adjust pwm_margin depending on the selected Control Type
   if (rtP_Left.z_ctrlTypSel == FOC_CTRL) {
@@ -221,9 +238,17 @@ void DMA1_Channel1_IRQHandler(void) {
 
 #ifdef ENABLE_ODOMETRY
     // Hall sensor tick counter (left)
+    //
+    // NOTE ON SIGN: negated to match odom_r, so that both counters agree in
+    // sign with this channel's n_mot. The upstream '+' here (against '-' on
+    // the right) is the stock hoverboard convention for a MIRRORED L/R motor
+    // pair, which does not apply on this platform - both motors on a given
+    // coprocessor drive wheels on the SAME side and turn the same way.
+    // Verified on the bench: with both channels commanded +200 RPM and both
+    // reporting n_mot +199, odom_r counted up while odom_l counted down.
     uint8_t encoding = (uint8_t)((hall_ul << 2) + (hall_vl << 1) + hall_wl);
     int wheel_pos = rtConstP.vec_hallToPos_Value[encoding];
-    odom_l = hallTickModulo(odom_l + hallTickDirection(wp_l_prev, wheel_pos), 9000);
+    odom_l = hallTickAccum(odom_l, -hallTickDirection(wp_l_prev, wheel_pos));
     wp_l_prev = wheel_pos;
 #endif
 
@@ -269,7 +294,7 @@ void DMA1_Channel1_IRQHandler(void) {
     // Hall sensor tick counter (right)
     encoding = (uint8_t)((hall_ur << 2) + (hall_vr << 1) + hall_wr);
     wheel_pos = rtConstP.vec_hallToPos_Value[encoding];
-    odom_r = hallTickModulo(odom_r - hallTickDirection(wp_r_prev, wheel_pos), 9000);
+    odom_r = hallTickAccum(odom_r, -hallTickDirection(wp_r_prev, wheel_pos));
     wp_r_prev = wheel_pos;
 #endif
 

@@ -352,11 +352,22 @@ int main(void) {
       }
       #endif
 
-      #if defined(TANK_STEERING) && !defined(VARIANT_HOVERCAR) && !defined(VARIANT_SKATEBOARD) 
-        // Tank steering (no mixing)
-        cmdL = steer; 
+      #if defined(TANK_STEERING) && !defined(VARIANT_HOVERCAR) && !defined(VARIANT_SKATEBOARD)
+        // Tank steering (no mixing).
+        //
+        // NOTE ON POLARITY: INVERT_L/R_DIRECTION are now OFF (config.h), so
+        // a positive cmdL/cmdR drives physically forward again. They had
+        // been enabled to try to fix the SPD_MODE runaway; that was a
+        // no-op for the runaway (they negate r_inpTgt, which negates target
+        // and rotation and n_mot together, leaving the relative sign
+        // unchanged) and only inverted the platform's physical direction as
+        // a side effect. The actual fix is N_MOT_MEAS_INVERT, which inverts
+        // the measured speed alone. Physical polarity and loop stability
+        // are now independent levers - if a wheel turns the wrong way,
+        // that's INVERT_L/R_DIRECTION's job and it no longer fights this.
+        cmdL = steer;
         cmdR = speed;
-      #else 
+      #else
         // ####### MIXER #######
         mixerFcn(speed << 4, steer << 4, &cmdR, &cmdL);   // This function implements the equations above
       #endif
@@ -364,9 +375,9 @@ int main(void) {
 
       // ####### SET OUTPUTS (if the target change is less than +/- 100) #######
       #ifdef INVERT_R_DIRECTION
-        pwmr = cmdR;
-      #else
         pwmr = -cmdR;
+      #else
+        pwmr = cmdR;
       #endif
       #ifdef INVERT_L_DIRECTION
         pwml = -cmdL;

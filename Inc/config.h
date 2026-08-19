@@ -154,15 +154,31 @@
 #define MOTOR_RIGHT_ENA                 // [-] Enable RIGHT motor. Comment-out if this motor is not needed to be operational
 
 // Control selections
+// FOC_CTRL + VLT_MODE confirmed clean on hardware (responsive, stops,
+// reverses, clamps at N_MOT_MAX) - rules out FOC's inner current/angle loop
+// as the source of the SPD_MODE runaway. Back to SPD_MODE now, with cf_nKi
+// zeroed (see BLDC_controller_data.c) to test whether the outer speed PI's
+// integral term is the culprit.
 #define CTRL_TYP_SEL    FOC_CTRL        // [-] Control type selection: COM_CTRL, SIN_CTRL, FOC_CTRL (default)
 #define CTRL_MOD_REQ    SPD_MODE        // [-] Control mode request: OPEN_MODE, VLT_MODE (default), SPD_MODE, TRQ_MODE. Note: SPD_MODE and TRQ_MODE are only available for CTRL_FOC!
 #define DIAG_ENA        1               // [-] Motor Diagnostics enable flag: 0 = Disabled, 1 = Enabled (default)
 
 // Limitation settings
 // Bench-test build: reduced limits for initial power-up validation.
-#define I_MOT_MAX       5                // [A] Maximum single motor current limit
-#define I_DC_MAX        7                // [A] Maximum stage2 DC Link current limit for Commutation and Sinusoidal types (This is the final current protection. Above this value, current chopping is applied. To avoid this make sure that I_DC_MAX = I_MOT_MAX + 2A)
-#define N_MOT_MAX       200              // [rpm] Maximum motor speed limit
+#define I_MOT_MAX       20              // [A] Maximum single motor current limit
+#define I_DC_MAX        22              // [A] Maximum stage2 DC Link current limit for Commutation and Sinusoidal types (This is the final current protection. Above this value, current chopping is applied. To avoid this make sure that I_DC_MAX = I_MOT_MAX + 2A)
+// N_MOT_MAX doubles as the SPD_MODE command FULL SCALE: BLDC_controller.c's
+// '<S36>' input block maps the raw +/-1000 input range onto +/-N_MOT_MAX rpm,
+// so changing this rescales every command the mainboard sends. It is
+// therefore PINNED AT 1000 to make raw == rpm hold by construction - commit
+// 70b82aa lowered it to 200 for bench testing and silently made every wheel
+// command execute at 1/5 the requested speed.
+//
+// Do NOT lower this to impose a speed limit. The operating speed ceiling is
+// MAX_THR in firmware/lib/mb_protocol/mb_protocol.h, which is upstream and
+// (with this pinned at 1000) is expressed directly in rpm. I_MOT_MAX above is
+// what protects the hardware.
+#define N_MOT_MAX       1000            // [rpm] Motor speed limit AND command full scale - see above, keep at 1000
 
 // Field Weakening / Phase Advance
 #define FIELD_WEAK_ENA  0               // [-] Field Weakening / Phase Advance enable flag: 0 = Disabled (default), 1 = Enabled
@@ -344,6 +360,36 @@
   #define TANK_STEERING                // use for tank steering, each input controls each wheel
   // #define SUPPORT_BUTTONS_LEFT       // use left sensor board cable for button inputs.  Disable DEBUG_SERIAL_USART2!
   // #define SUPPORT_BUTTONS_RIGHT      // use right sensor board cable for button inputs. Disable DEBUG_SERIAL_USART3!
+
+  // defines.h hall V/W pins restored to the swapped mapping validated on
+  // hardware via mainboard_motor_test (frog branch); commit 2ac03e8's
+  // "fork's original" unswapped mapping was wrong for this wiring and, under
+  // FOC_CTRL/SPD_MODE, produced screech+stall on both motors. main.c's
+  // pwmr sign branch was also swapped relative to that verified baseline
+  // and has been restored to match.
+
+  // ── SPD_MODE speed-feedback sign ───────────────────────────────────────
+  // On this hardware's hall-vs-phase wiring permutation, the controller's
+  // hall direction-detection disagrees with the direction a positive
+  // r_inpTgt / Vq actually drives. That makes the SPD_MODE outer speed loop
+  // POSITIVE feedback (error = target - measured grows as the motor
+  // accelerates), which diverges for any cf_nKi > 0 and settles at an
+  // inverted, wrong-magnitude speed for cf_nKi == 0. This inverts the
+  // MEASURED speed only (Src/BLDC_controller.c, '<S17>/Divide11'), which is
+  // the only lever that decouples measurement from commutation.
+  //
+  // Do NOT use INVERT_L/R_DIRECTION for this. Those negate r_inpTgt, which
+  // negates the target AND the resulting rotation AND therefore n_mot - the
+  // relative sign is invariant, so they are a no-op for this bug (and were
+  // confirmed as such on hardware) while needlessly flipping the platform's
+  // physical polarity.
+  //
+  // If a future rewiring makes the two agree, comment this out; the symptom
+  // of having it backwards is the same runaway in the opposite direction.
+  #define N_MOT_MEAS_INVERT
+
+  // #define INVERT_R_DIRECTION     // Invert rotation of right motor
+  // #define INVERT_L_DIRECTION     // Invert rotation of left motor
 #endif
 // ######################## END OF VARIANT_USART SETTINGS #########################
 

@@ -302,6 +302,13 @@ P rtP_Left = {
 
   /* Variable: cf_nKp
    * Referenced by: '<S61>/cf_nKp'
+   *
+   * Restored to stock. This was bisected down to 1208U while chasing the
+   * SPD_MODE runaway, but that runaway was a speed-feedback SIGN inversion
+   * (see N_MOT_MEAS_INVERT in Inc/config.h), which is unstable for any
+   * gain - so the bisection was measuring the wrong thing and never
+   * isolated gain magnitude as mattering. Re-tune from stock only if the
+   * loop actually misbehaves with the sign fixed.
    */
   4833U,
 
@@ -329,6 +336,12 @@ P rtP_Left = {
 
   /* Variable: cf_nKi
    * Referenced by: '<S61>/cf_nKi'
+   *
+   * Restored to stock. The "every nonzero Ki eventually saturates, only the
+   * time scales" cliff seen during the runaway investigation is the exact
+   * signature of positive feedback (an integrator has infinite DC gain, so
+   * a sign-inverted loop diverges for every Ki > 0) - not a tuning
+   * boundary. Fixed at the source via N_MOT_MEAS_INVERT.
    */
   251U,
 

@@ -19,6 +19,17 @@
 
 #include "BLDC_controller.h"
 
+/* HAND-ADDED: for N_MOT_MEAS_INVERT (see '<S17>/Divide11' below).
+ * config.h defines OPEN_/VLT_/SPD_/TRQ_MODE as plain ints and this file
+ * redefines them below as uint8_T with the same values; #undef them here so
+ * the generated definitions win cleanly instead of warning on redefinition.
+ */
+#include "config.h"
+#undef OPEN_MODE
+#undef SPD_MODE
+#undef TRQ_MODE
+#undef VLT_MODE
+
 /* Named constants for Chart: '<S5>/F03_02_Control_Mode_Manager' */
 #define IN_ACTIVE                      ((uint8_T)1U)
 #define IN_NO_ACTIVE_CHILD             ((uint8_T)0U)
@@ -1178,7 +1189,34 @@ void BLDC_controller_step(RT_MODEL *const rtM)
     /* End of Switch: '<S17>/Switch3' */
 
     /* Product: '<S17>/Divide11' */
+#ifdef N_MOT_MEAS_INVERT
+    /* HAND-ADDED: invert the sign of the MEASURED motor speed only.
+     *
+     * The hall direction-detection output (rtDW->Switch2_e) disagrees with
+     * the direction that a positive r_inpTgt / Vq actually drives on this
+     * hardware's hall-vs-phase wiring permutation. That makes the SPD_MODE
+     * outer loop POSITIVE feedback: error = target - measured GROWS as the
+     * motor accelerates, so any nonzero cf_nKi diverges to saturation and
+     * sticks there (an integrator has infinite DC gain, so this is unstable
+     * for every Ki > 0, not just large ones). With cf_nKi = 0 the loop is
+     * still stable (loop gain < 1) but settles at an inverted, wrong-
+     * magnitude speed - which is exactly the +200 target -> -51 measured
+     * behaviour seen on the bench.
+     *
+     * This is the ONLY correct lever. INVERT_L/R_DIRECTION negates
+     * r_inpTgt, which negates the target AND the resulting rotation AND
+     * therefore n_mot - the relative sign is invariant, so it is
+     * algebraically a no-op for this bug (confirmed by hardware retest).
+     *
+     * Negate here, NOT at rtDW->Switch2_e: that signal also feeds the FOC
+     * electrical-angle interpolation ('<S14>' and '<S86>', see the uses
+     * below and near the commutation map) and flipping it there would
+     * break commutation itself.
+     */
+    rtDW->Divide11 = (int16_T)(-(rtb_Switch1_l * rtDW->Switch2_e));
+#else
     rtDW->Divide11 = (int16_T)(rtb_Switch1_l * rtDW->Switch2_e);
+#endif
 
     /* Update for UnitDelay: '<S17>/UnitDelay4' */
     rtDW->UnitDelay4_DSTATE = rtDW->z_counterRawPrev;
@@ -2619,6 +2657,25 @@ void BLDC_controller_step(RT_MODEL *const rtM)
                            &rtDW->Merge, &rtDW->PI_clamp_fixdt_l4);
 
           /* End of Outputs for SubSystem: '<S61>/PI_clamp_fixdt' */
+
+          /* NOTE: an earlier hand-patch clamped rtDW->Merge to +/-rtP->i_max
+           * here, believing i_max was unenforced on this path. That was a
+           * unit error and has been removed. rtDW->Merge in SPD_MODE is the
+           * q-axis VOLTAGE command (it feeds the inverse Park transform
+           * below, exactly as in VLT_MODE), not a current. i_max is in ADC
+           * counts (I_MOT_MAX * A2BIT_CONV << 4 = 5*25<<4 = 2000) while
+           * Vq_max_M1 is 14400, so the clamp capped Vq at 13.9% of full -
+           * predicting a ~153 RPM ceiling against the ~115 RPM actually
+           * observed. That ceiling was this clamp, not a current limit.
+           *
+           * The real current limit is present and lives in
+           * '<S81>/Speed_Mode_Protection' (case 1 of the '<S80>' switch
+           * above): it back-calculates measured-iq overshoot past i_max
+           * into this PI's integrator through rtDW->Divide1. It is a soft
+           * limiter acting THROUGH the integrator, which is why it appeared
+           * to do nothing - it cannot win against a positive-feedback
+           * runaway. With the n_mot sign fixed it works as intended.
+           */
 
           /* End of Outputs for SubSystem: '<S59>/Speed_Mode' */
           break;
