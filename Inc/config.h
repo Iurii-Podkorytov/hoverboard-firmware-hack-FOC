@@ -154,31 +154,67 @@
 #define MOTOR_RIGHT_ENA                 // [-] Enable RIGHT motor. Comment-out if this motor is not needed to be operational
 
 // Control selections
-// FOC_CTRL + VLT_MODE confirmed clean on hardware (responsive, stops,
-// reverses, clamps at N_MOT_MAX) - rules out FOC's inner current/angle loop
-// as the source of the SPD_MODE runaway. Back to SPD_MODE now, with cf_nKi
-// zeroed (see BLDC_controller_data.c) to test whether the outer speed PI's
-// integral term is the culprit.
+//
+// TRQ_MODE: this build is the torque half of a combined speed-torque
+// architecture. The coprocessors run open-loop-in-speed torque control, and a
+// single outer velocity PI PER SIDE runs on the mainboard ESP32
+// (firmware/src/mainboard_fw/side_controller.h), emitting one current command
+// that is sent identically to BOTH wheels on that side.
+//
+// Why: the two wheels on a side are rigidly coupled through the chassis and
+// the ground - one mechanical degree of freedom. SPD_MODE gave it two
+// independent integral controllers, which disagree about the MEASUREMENT
+// (n_mot is quantised to 1 rpm, and the motors have different hall offsets),
+// so one integrator winds toward +I_MOT_MAX while the other winds toward
+// -I_MOT_MAX. Tyre slip bounds the fight, so it is paid for in circulating
+// current and heat rather than instability. One loop per side regulating the
+// AVERAGE leaves the differential mode open-loop, which is the correct thing
+// to do with a redundant actuator pair.
+//
+// SPD_MODE is still the validated fallback - see docs/spd_mode_investigation.md
+// and the frog_odom branch. Note that STANDSTILL_HOLD_ENABLE and
+// ELECTRIC_BRAKE_ENABLE below become available in TRQ_MODE but are
+// deliberately left off: the mainboard's outer PI already holds position at
+// zero command, and an electric brake injecting torque at zero request would
+// fight it.
 #define CTRL_TYP_SEL    FOC_CTRL        // [-] Control type selection: COM_CTRL, SIN_CTRL, FOC_CTRL (default)
-#define CTRL_MOD_REQ    SPD_MODE        // [-] Control mode request: OPEN_MODE, VLT_MODE (default), SPD_MODE, TRQ_MODE. Note: SPD_MODE and TRQ_MODE are only available for CTRL_FOC!
+#define CTRL_MOD_REQ    TRQ_MODE        // [-] Control mode request: OPEN_MODE, VLT_MODE (default), SPD_MODE, TRQ_MODE. Note: SPD_MODE and TRQ_MODE are only available for CTRL_FOC!
 #define DIAG_ENA        0               // [-] Motor Diagnostics enable flag: 0 = Disabled, 1 = Enabled (default)
 
 // Limitation settings
-// Bench-test build: reduced limits for initial power-up validation.
-#define I_MOT_MAX       20              // [A] Maximum single motor current limit
-#define I_DC_MAX        22              // [A] Maximum stage2 DC Link current limit for Commutation and Sinusoidal types (This is the final current protection. Above this value, current chopping is applied. To avoid this make sure that I_DC_MAX = I_MOT_MAX + 2A)
-// N_MOT_MAX doubles as the SPD_MODE command FULL SCALE: BLDC_controller.c's
-// '<S36>' input block maps the raw +/-1000 input range onto +/-N_MOT_MAX rpm,
-// so changing this rescales every command the mainboard sends. It is
-// therefore PINNED AT 1000 to make raw == rpm hold by construction - commit
-// 70b82aa lowered it to 200 for bench testing and silently made every wheel
-// command execute at 1/5 the requested speed.
 //
-// Do NOT lower this to impose a speed limit. The operating speed ceiling is
-// MAX_THR in firmware/lib/mb_protocol/mb_protocol.h, which is upstream and
-// (with this pinned at 1000) is expressed directly in rpm. I_MOT_MAX above is
-// what protects the hardware.
-#define N_MOT_MAX       1000            // [rpm] Motor speed limit AND command full scale - see above, keep at 1000
+// WHICH CONSTANT IS THE COMMAND FULL SCALE DEPENDS ON THE CONTROL MODE.
+// BLDC_controller.c's '<S36>' input block selects it from a mode-indexed
+// table (~line 1930):
+//
+//     tmp[0] = 0;              // OPEN_MODE
+//     tmp[1] = rtP->Vd_max;    // VLT_MODE -> voltage full scale
+//     tmp[2] = rtP->n_max;     // SPD_MODE -> N_MOT_MAX rpm
+//     tmp[3] = rtP->i_max;     // TRQ_MODE -> I_MOT_MAX amps   <-- this build
+//
+// This build is TRQ_MODE, so the raw +/-1000 the mainboard sends maps onto
+// +/-I_MOT_MAX AMPS. That inverts the roles these two constants had in the
+// SPD_MODE build:
+//
+//   I_MOT_MAX is now the COMMAND FULL SCALE as well as the current limit.
+//   Changing it rescales every command the mainboard sends, so it must stay
+//   in sync with I_MOT_MAX_A in firmware/lib/mb_protocol/mb_protocol.h.
+//
+//   N_MOT_MAX is now a GENUINE SPEED LIMIT again - it no longer scales
+//   anything. This matters more than it did before: in TRQ_MODE nothing else
+//   bounds wheel speed. A speed setpoint self-limits; a torque setpoint does
+//   not, so an unloaded wheel accelerates until n_max's back-calculation
+//   ('<S82>', I_backCalc_fixdt against n_max) pulls the current down. That
+//   protection is the ONLY overspeed guard in this build, and it depends on
+//   n_mot being correctly signed - see N_MOT_MEAS_INVERT below.
+//
+// (History, so the old rationale is not re-derived: under SPD_MODE this file
+// pinned N_MOT_MAX at 1000 to make raw == rpm hold by construction, after
+// commit 70b82aa lowered it to 200 and silently made every wheel command
+// execute at 1/5 the requested speed. That pinning is obsolete here.)
+#define I_MOT_MAX       20              // [A] Max single motor current AND the TRQ_MODE command full scale - see above
+#define I_DC_MAX        22              // [A] Maximum stage2 DC Link current limit for Commutation and Sinusoidal types (This is the final current protection. Above this value, current chopping is applied. To avoid this make sure that I_DC_MAX = I_MOT_MAX + 2A)
+#define N_MOT_MAX       500             // [rpm] Motor speed limit - a real limit in TRQ_MODE, and the only overspeed guard. See above.
 
 // Field Weakening / Phase Advance
 #define FIELD_WEAK_ENA  0               // [-] Field Weakening / Phase Advance enable flag: 0 = Disabled (default), 1 = Enabled
@@ -211,8 +247,25 @@
  * If VAL_floatingPoint < 0,  VAL_fixedPoint = 2^16 + floor(VAL_floatingPoint * 2^14).
 */
 // Value of RATE is in fixdt(1,16,4): VAL_fixedPoint = VAL_floatingPoint * 2^4. In this case 480 = 30 * 2^4
-#define DEFAULT_RATE                480   // 30.0f [-] lower value == slower rate [0, 32767] = [0.0, 2047.9375]. Do NOT make rate negative (>32767)
-#define DEFAULT_FILTER              6553  // Default for FILTER 0.1f [-] lower value == softer filter [0, 65535] = [0.0 - 1.0].
+//
+// RAISED FOR TRQ_MODE. Src/main.c applies rateLimiter16() then
+// filtLowPass32() to the incoming command at the DELAY_IN_MAIN_LOOP (5 ms)
+// rate, i.e. INSIDE what is now a cascaded loop - the mainboard's outer
+// velocity PI sees these as lag in its own actuator.
+//
+// Stock values were RATE=480 (30 units/tick -> ~167 ms from zero to full
+// scale) and FILTER=6553 (0.1 -> first-order tau ~= 45 ms). Harmless when the
+// command is a speed setpoint and this is just a comfort ramp; not harmless
+// when it is a torque setpoint, where it caps the outer loop's usable
+// bandwidth near 1-2 Hz and makes large steps behave nonlinearly.
+//
+// RATE 4800 = 300 units/tick -> ~17 ms zero-to-full, still enough to stop a
+// step change from being a true discontinuity at the inverter.
+// FILTER 32768 = 0.5 -> tau ~= 5 ms, an order of magnitude out of the outer
+// loop's way. Try 65535 (filter off) if any residual lag shows up in tuning;
+// 0.5 is the conservative first step.
+#define DEFAULT_RATE                4800  // 300.0f [-] lower value == slower rate [0, 32767] = [0.0, 2047.9375]. Do NOT make rate negative (>32767)
+#define DEFAULT_FILTER              32768 // FILTER 0.5f [-] lower value == softer filter [0, 65535] = [0.0 - 1.0].
 #define DEFAULT_SPEED_COEFFICIENT   16384 // Default for SPEED_COEFFICIENT 1.0f [-] higher value == stronger. [0, 65535] = [-2.0 - 2.0]. In this case 16384 = 1.0 * 2^14
 #define DEFAULT_STEER_COEFFICIENT   8192  // Defualt for STEER_COEFFICIENT 0.5f [-] higher value == stronger. [0, 65535] = [-2.0 - 2.0]. In this case  8192 = 0.5 * 2^14. If you do not want any steering, set it to 0.
 // ######################### END OF DEFAULT SETTINGS ##########################
@@ -368,7 +421,21 @@
   // pwmr sign branch was also swapped relative to that verified baseline
   // and has been restored to match.
 
-  // ── SPD_MODE speed-feedback sign ───────────────────────────────────────
+  // ── Speed-feedback sign — STILL REQUIRED IN TRQ_MODE ───────────────────
+  //
+  // This was originally the fix for the SPD_MODE runaway (below), and it is
+  // tempting to assume it became irrelevant once the outer speed loop moved
+  // off this board. It did not. n_mot must stay correctly signed because:
+  //
+  //   1. It is the ONLY overspeed guard in TRQ_MODE. n_max's back-calculation
+  //      ('<S82>') subtracts |n_mot| from n_max; with the sign wrong the
+  //      wheel accelerates unchecked. See the N_MOT_MAX note above.
+  //   2. It is the mainboard's outer velocity PI feedback, via
+  //      Feedback.speedL_meas / speedR_meas. An inverted feedback there
+  //      recreates exactly the positive-feedback runaway described below,
+  //      one level up.
+  //   3. It is what the odom_l/odom_r tick sign was aligned against.
+  //
   // On this hardware's hall-vs-phase wiring permutation, the controller's
   // hall direction-detection disagrees with the direction a positive
   // r_inpTgt / Vq actually drives. That makes the SPD_MODE outer speed loop
