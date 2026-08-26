@@ -212,9 +212,29 @@
 // pinned N_MOT_MAX at 1000 to make raw == rpm hold by construction, after
 // commit 70b82aa lowered it to 200 and silently made every wheel command
 // execute at 1/5 the requested speed. That pinning is obsolete here.)
-#define I_MOT_MAX       20              // [A] Max single motor current AND the TRQ_MODE command full scale - see above
-#define I_DC_MAX        22              // [A] Maximum stage2 DC Link current limit for Commutation and Sinusoidal types (This is the final current protection. Above this value, current chopping is applied. To avoid this make sure that I_DC_MAX = I_MOT_MAX + 2A)
+// BENCH VALUE, deliberately low. This is BOTH the hardware current limit
+// and the command full scale, so lowering it is genuinely protective: raw
+// 1000 lands on exactly this number, which means no command the mainboard
+// can send - correct, buggy, or corrupted - can ask for more than this.
+// Raise toward 20 A only after the outer loop is characterised, and change
+// I_MOT_MAX_A in mb_protocol.h in the SAME commit.
+#define I_MOT_MAX       8               // [A] Max single motor current AND the TRQ_MODE command full scale - see above
+#define I_DC_MAX        10              // [A] Maximum stage2 DC Link current limit for Commutation and Sinusoidal types (This is the final current protection. Above this value, current chopping is applied. To avoid this make sure that I_DC_MAX = I_MOT_MAX + 2A)
 #define N_MOT_MAX       500             // [rpm] Motor speed limit - a real limit in TRQ_MODE, and the only overspeed guard. See above.
+
+// ── Zero-command idle (TRQ_MODE only) ────────────────────────────────────────
+// Drop to OPEN_MODE when the command is essentially zero, instead of sitting
+// in TRQ_MODE regulating iq to 0. See the long note at the use site in
+// Src/util.c: an active current loop at 0 A is the worst operating point for a
+// hall FOC (deadtime sign chatter + 60 deg angle jumps at hall edges), and it
+// makes every wheel dither at rest. OPEN_MODE is passive and cannot
+// limit-cycle. Comment this out to get the raw stock behaviour back.
+#define ZERO_CMD_OPEN_MODE
+// Hysteresis in raw command counts (full scale 1000 = I_MOT_MAX). 8 counts is
+// 0.064 A at I_MOT_MAX=8 - far below anything that moves the robot, and well
+// clear of the +/-1 count rounding the mainboard can emit.
+#define ZERO_CMD_ENTER  8               // below this (and idle) -> OPEN_MODE
+#define ZERO_CMD_EXIT   16              // above this -> back to TRQ_MODE
 
 // Field Weakening / Phase Advance
 #define FIELD_WEAK_ENA  0               // [-] Field Weakening / Phase Advance enable flag: 0 = Disabled (default), 1 = Enabled
@@ -246,26 +266,35 @@
  * If VAL_floatingPoint >= 0, VAL_fixedPoint = VAL_floatingPoint * 2^14
  * If VAL_floatingPoint < 0,  VAL_fixedPoint = 2^16 + floor(VAL_floatingPoint * 2^14).
 */
-// Value of RATE is in fixdt(1,16,4): VAL_fixedPoint = VAL_floatingPoint * 2^4. In this case 480 = 30 * 2^4
+// Value of RATE is in fixdt(1,16,4): VAL_fixedPoint = VAL_floatingPoint * 2^4.
 //
-// RAISED FOR TRQ_MODE. Src/main.c applies rateLimiter16() then
-// filtLowPass32() to the incoming command at the DELAY_IN_MAIN_LOOP (5 ms)
-// rate, i.e. INSIDE what is now a cascaded loop - the mainboard's outer
-// velocity PI sees these as lag in its own actuator.
+// EFFECTIVELY DISABLED FOR TRQ_MODE, and the reason is a change of MEANING,
+// not just of tuning.
 //
-// Stock values were RATE=480 (30 units/tick -> ~167 ms from zero to full
-// scale) and FILTER=6553 (0.1 -> first-order tau ~= 45 ms). Harmless when the
-// command is a speed setpoint and this is just a comfort ramp; not harmless
-// when it is a torque setpoint, where it caps the outer loop's usable
-// bandwidth near 1-2 Hz and makes large steps behave nonlinearly.
+// Src/main.c rate-limits and low-passes `cmd` before it becomes r_inpTgt. In
+// the stock SPD_MODE build r_inpTgt is a SPEED SETPOINT, so these two act on
+// the setpoint path: at a constant setpoint they are completely transparent,
+// and they only soften operator step inputs. The fast 16 kHz speed PI inside
+// the controller did all the real work with no lag ahead of it.
 //
-// RATE 4800 = 300 units/tick -> ~17 ms zero-to-full, still enough to stop a
-// step change from being a true discontinuity at the inverter.
-// FILTER 32768 = 0.5 -> tau ~= 5 ms, an order of magnitude out of the outer
-// loop's way. Try 65535 (filter off) if any residual lag shows up in tuning;
-// 0.5 is the conservative first step.
-#define DEFAULT_RATE                4800  // 300.0f [-] lower value == slower rate [0, 32767] = [0.0, 2047.9375]. Do NOT make rate negative (>32767)
-#define DEFAULT_FILTER              32768 // FILTER 0.5f [-] lower value == softer filter [0, 65535] = [0.0 - 1.0].
+// In this build r_inpTgt is a CURRENT setpoint produced by the mainboard's
+// outer velocity loop - it is the CONTROL SIGNAL, changing every tick. The
+// same two blocks are now lag and slew INSIDE the feedback loop. Measured
+// against the stock 16 kHz speed loop, the cascade was reacting to a friction
+// event about 300x slower, and roughly half of that was these two blocks
+// rather than the 100 Hz sample rate.
+//
+// So both are opened up to pass-through. Command integrity is already
+// protected by the frame checksum, and the outer loop's output is inherently
+// smooth (slew-limited setpoint, clamped PI), so there is nothing left for
+// them to smooth that is not better smoothed upstream.
+//
+//   RATE   32767 = 2047.9 counts per 5 ms -> full scale in one tick
+//   FILTER 65535 = alpha 1.0              -> y = u, no lag
+//
+// Restore 480 / 6553 if this build is ever reverted to SPD_MODE.
+#define DEFAULT_RATE                32767 // pass-through; see note above. Do NOT exceed 32767.
+#define DEFAULT_FILTER              65535 // alpha = 1.0, no filtering; see note above
 #define DEFAULT_SPEED_COEFFICIENT   16384 // Default for SPEED_COEFFICIENT 1.0f [-] higher value == stronger. [0, 65535] = [-2.0 - 2.0]. In this case 16384 = 1.0 * 2^14
 #define DEFAULT_STEER_COEFFICIENT   8192  // Defualt for STEER_COEFFICIENT 0.5f [-] higher value == stronger. [0, 65535] = [-2.0 - 2.0]. In this case  8192 = 0.5 * 2^14. If you do not want any steering, set it to 0.
 // ######################### END OF DEFAULT SETTINGS ##########################

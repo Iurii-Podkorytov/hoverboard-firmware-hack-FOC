@@ -1033,9 +1033,48 @@ void handleTimeout(void) {
       ctrlModReq  = OPEN_MODE;                                          // Request OPEN_MODE. This will bring the motor power to 0 in a controlled way
       input1[inIdx].cmd  = 0;
       input2[inIdx].cmd  = 0;
-    } else {
+    }
+#if (CTRL_MOD_REQ == TRQ_MODE) && defined(ZERO_CMD_OPEN_MODE)
+    // ####### ZERO-COMMAND IDLE: leave TRQ_MODE when nothing is being asked ###
+    //
+    // Holding iq = 0 with a live current loop is the WORST operating point for
+    // a hall-sensor FOC, and it makes every wheel dither back and forth at
+    // rest even with an exactly-zero command:
+    //
+    //   - Deadtime (DEAD_TIME) injects a voltage error whose sign follows the
+    //     sign of the phase current. At ~0 A that sign is just noise, so the
+    //     applied voltage chatters.
+    //   - The rotor angle comes from 6 hall states per electrical revolution,
+    //     interpolated between edges. At standstill the interpolation clamps
+    //     at the sector boundary, so the tiniest creep crosses an edge and the
+    //     angle estimate jumps 60 deg. The same physical current then Park-
+    //     transforms into a different iq/id split, so any small current-sense
+    //     offset produces a torque that REVERSES at the boundary. The result
+    //     is a limit cycle pinned to the hall edge.
+    //
+    // SPD_MODE never showed this because its speed PI actively servos n_mot to
+    // zero, which dominates the artifact. A zero TORQUE request has no such
+    // restoring action, so the artifact is all that is left.
+    //
+    // OPEN_MODE brings power to zero in a controlled way and leaves the bridge
+    // passive - and a passive bridge cannot limit-cycle. Hysteresis keeps the
+    // transition itself from chattering: drop out of TRQ_MODE below
+    // ZERO_CMD_ENTER, and do not come back until ZERO_CMD_EXIT.
+    else {
+      static uint8_t zeroCmdIdle = 1;                                   // start idle; the first real command wakes it
+      int16_t cmdMax = MAX(ABS(input1[inIdx].cmd), ABS(input2[inIdx].cmd));
+      if (zeroCmdIdle) {
+        if (cmdMax > ZERO_CMD_EXIT)  { zeroCmdIdle = 0; }
+      } else {
+        if (cmdMax < ZERO_CMD_ENTER) { zeroCmdIdle = 1; }
+      }
+      ctrlModReq = zeroCmdIdle ? OPEN_MODE : ctrlModReqRaw;
+    }
+#else
+    else {
       ctrlModReq  = ctrlModReqRaw;                                      // Follow the Mode request
     }
+#endif
 
     // Beep in case of Input index change
     if (inIdx && !inIdx_prev) {                                         // rising edge
