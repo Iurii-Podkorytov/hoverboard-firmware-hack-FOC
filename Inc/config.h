@@ -155,59 +155,48 @@
 
 // Control selections
 //
-// VLT_MODE: this build is the voltage half of a combined speed-voltage
-// architecture. The coprocessors apply a q-axis VOLTAGE with no speed
-// regulation of their own, and a single outer velocity PI PER SIDE runs on the
-// mainboard ESP32 (firmware/src/mainboard_fw/side_controller.h), emitting one
-// voltage command sent identically to BOTH wheels on that side.
+// VOLTAGE MODE. The coprocessors apply a q-axis voltage and do not regulate
+// speed; a single outer velocity PI per SIDE runs on the mainboard ESP32
+// (firmware/src/mainboard_fw/side_controller.h) and sends one voltage command
+// to both wheels on that side.
 //
-// WHY VOLTAGE RATHER THAN TORQUE (this branch's whole reason to exist)
+// WHY VOLTAGE RATHER THAN CURRENT
 //
-// The two wheels on a side are kinematically constrained to the same speed.
-// For a planar rigid body the longitudinal velocity of a contact point at
-// (x, y) is v - w*y, which does not depend on x at all - so front and rear on
-// one side must roll at the same speed for EVERY achievable motion, turns
-// included. Their difference is a null-space direction of the actuator map: it
-// can never produce motion, only internal force (tyre scrub and circulating
-// current). That is why four SPD_MODE speed integrators wound without bound,
-// and why the loop is per side.
+// The two wheels on a side are kinematically constrained to the same speed:
+// for a planar rigid body the longitudinal velocity of a contact point depends
+// only on its lateral coordinate, so front and rear on one side must roll at
+// the same speed for every achievable motion, turns included. Their difference
+// is a null-space direction of the actuator map - it can never produce motion,
+// only tyre scrub and circulating current.
 //
-// TRQ_MODE (branch frog_torque) fixes the winding but deletes something the
-// motor gave for free. A voltage-fed motor has a DROOPING torque-speed curve -
-// back-EMF rises with speed, so torque falls - and that droop is a physical
-// restoring force on the differential mode, acting at every instant with no
-// controller, no gain, and no feedback path to lose. Current control makes the
-// torque-speed curve FLAT, which removes the droop entirely; frog_torque then
-// has to put an explicit damper (SIDE_CTRL_KD_DIFF) back in software to
-// replace it. Here the differential mode damps itself.
+// A voltage-fed motor has a DROOPING torque-speed curve: back-EMF rises with
+// speed, so torque falls. That droop is a physical restoring force on the
+// differential mode, acting at every instant with no controller, no gain, and
+// no feedback path to lose. Current control makes the curve FLAT and removes
+// it, which then has to be replaced by an explicit damper in software.
 //
-// Second consequence: the plant seen by the outer loop is first-order
-// (w/V = K/(tau*s+1)) rather than an integrator (w/i = G/s). Finite DC gain,
-// ~90 deg less phase lag at crossover, and integral action is no longer
-// load-bearing for stability. It tolerates far more gain than frog_torque did.
+// It also makes the plant seen by the outer loop first-order
+// (w/V = K/(tau*s+1)) rather than an integrator: finite DC gain, ~90 deg less
+// phase lag at crossover, and integral action not load-bearing for stability.
 //
-// What this GIVES UP: a voltage command is not a torque command, so nothing
-// above it can reason in newton-metres. Traction control and direct yaw-torque
-// allocation are not expressible here. That is the trade - see
-// docs/spd_mode_investigation.md.
+// What it gives up: a voltage command is not a torque command, so nothing above
+// it can reason in newton-metres.
 //
-// Failure modes are gentler than frog_torque's. A stale voltage command holds
-// roughly a speed (back-EMF self-limits it) rather than being an open-loop
-// acceleration, and a zero command is a shorted winding - dynamic braking, not
-// free-wheeling. ZERO_CMD_OPEN_MODE below is consequently inert on this
-// branch, by its own TRQ_MODE guard.
+// Failure modes are gentle. A stale voltage command holds roughly a speed,
+// because back-EMF self-limits it, rather than being an open-loop acceleration;
+// and a zero command is a shorted winding - dynamic braking, not free-wheeling.
+// ZERO_CMD_OPEN_MODE below is inert here, by its own guard.
 //
-// SPD_MODE remains the validated fallback - see docs/spd_mode_investigation.md
-// and the frog_odom branch. STANDSTILL_HOLD_ENABLE and ELECTRIC_BRAKE_ENABLE
-// stay off: the mainboard's outer PI already holds position at zero command.
+// STANDSTILL_HOLD_ENABLE and ELECTRIC_BRAKE_ENABLE stay off: the mainboard
+// outer PI already holds position at zero command.
 #define CTRL_TYP_SEL    FOC_CTRL        // [-] Control type selection: COM_CTRL, SIN_CTRL, FOC_CTRL (default)
 #define CTRL_MOD_REQ    VLT_MODE        // [-] Control mode request: OPEN_MODE, VLT_MODE (default), SPD_MODE, TRQ_MODE. Note: SPD_MODE and TRQ_MODE are only available for CTRL_FOC!
 #define DIAG_ENA        0               // [-] Motor Diagnostics enable flag: 0 = Disabled, 1 = Enabled (default)
 
 // Limitation settings
 //
-// WHICH CONSTANT IS THE COMMAND FULL SCALE DEPENDS ON THE CONTROL MODE.
-// BLDC_controller.c's '<S36>' input block selects it from a mode-indexed
+// WHICH CONSTANT IS THE COMMAND FULL SCALE DEPENDS ON THE CONTROL MODE. The
+// '<S36>' input block in BLDC_controller.c selects it from a mode-indexed
 // table (~line 1930):
 //
 //     tmp[0] = 0;              // OPEN_MODE
@@ -216,51 +205,67 @@
 //     tmp[3] = rtP->i_max;     // TRQ_MODE -> I_MOT_MAX amps
 //
 // This build is VLT_MODE, so the raw +/-1000 the mainboard sends maps onto
-// +/-Vd_max. And Vd_max is NOT in this file - it is a compile-time constant
-// in Src/BLDC_controller_data.c, currently 14400, which is full modulation.
+// +/-Vd_max. Vd_max is not in this file - it is a compile-time constant in
+// Src/BLDC_controller_data.c, currently 14400, which is full modulation.
 //
-// THAT IS THE BIG SIMPLIFICATION OF THIS BRANCH. Both limits below are now
-// purely protective again: neither scales the command, so neither has to stay
-// in sync with anything on the mainboard. The 70b82aa-class silent-rescale
-// trap - where changing a limit quietly restaled every command - cannot
-// happen here. Lower either one freely for bench work.
+// Both limits below are therefore purely protective: neither scales the
+// command, so neither has to stay in sync with anything on the mainboard, and
+// either can be lowered freely for bench work.
 //
-//   I_MOT_MAX is a pure current limit again. In VLT_MODE it is enforced by
+//   I_MOT_MAX is a pure current limit. It is enforced by
 //   '<S83>'/Voltage_Mode_Protection, which back-calculates measured-iq
-//   overshoot past i_max and pulls the applied Vq down. Note this is a SOFT
-//   limiter working through the voltage command, not a hard clamp - behind it
-//   sits I_DC_MAX level-2 DC-link chopping (bldc.c:157), which is hard.
+//   overshoot past i_max and pulls the applied Vq down - a SOFT limiter working
+//   through the voltage command, not a hard clamp. Behind it sits I_DC_MAX
+//   level-2 DC-link chopping (bldc.c), which is hard.
 //
-//   N_MOT_MAX is a real speed limit, enforced by the second back-calculation
-//   in the same '<S83>' block (against n_max). Less critical than it was in
-//   TRQ_MODE - a voltage command is partly self-limiting because back-EMF
-//   opposes it, so an unloaded wheel coasts up to roughly V/Ke and stops -
-//   but it is still the guard that makes that ceiling a chosen number rather
-//   than an emergent one. It depends on n_mot being correctly signed; see
+//   N_MOT_MAX is a real speed limit, enforced by the second back-calculation in
+//   the same '<S83>' block. A voltage command is partly self-limiting because
+//   back-EMF opposes it, so an unloaded wheel coasts up to roughly V/Ke and
+//   stops - but this is what makes that ceiling a chosen number rather than an
+//   emergent one. It depends on n_mot being correctly signed; see
 //   N_MOT_MEAS_INVERT below.
 //
-// The mainboard clamps its own output well below full modulation
-// (SIDE_CTRL_V_MAX_V in side_controller.h) - that is the knob for bench work,
-// exactly as SIDE_CTRL_I_MAX_A was on frog_torque.
+// The mainboard clamps its own output below full modulation
+// (SIDE_CTRL_V_MAX_V in side_controller.h, currently 19 V). That clamp is not a
+// free knob: it is DERIVED from MAX_WHEEL_RAD_S in mb_protocol.h, the single
+// platform speed ceiling. To slow the robot down, change that one constant -
+// not this file.
+#define I_MOT_MAX       18              // [A] Maximum single motor current limit (pure limit in VLT_MODE - see above)
+#define I_DC_MAX        20              // [A] Maximum stage2 DC Link current limit for Commutation and Sinusoidal types (This is the final current protection. Above this value, current chopping is applied. To avoid this make sure that I_DC_MAX = I_MOT_MAX + 2A)
+
+// ── N_MOT_MAX: MIRRORED ON THE MAINBOARD, KEEP THE TWO IN STEP ───────────────
 //
-// (History, so the old rationale is not re-derived: under SPD_MODE this file
-// pinned N_MOT_MAX at 1000 to make raw == rpm hold by construction, after
-// commit 70b82aa lowered it to 200 and silently made every wheel command
-// execute at 1/5 the requested speed. Under TRQ_MODE it was I_MOT_MAX that
-// doubled as full scale. Neither applies here.)
+// This number also appears as COPROC_N_MOT_MAX_RPM in
+// firmware/lib/mb_protocol/mb_protocol.h, where a static_assert checks the
+// mainboard's speed ceiling stays below it. Change one, change both, and
+// reflash the coprocessors - the mainboard cannot detect a stale flash.
 //
-// BENCH VALUES, deliberately low. Unlike frog_torque, lowering I_MOT_MAX no
-// longer rescales anything - it just limits current. Raise toward 20 A once
-// the loop is characterised.
-#define I_MOT_MAX       8               // [A] Maximum single motor current limit (pure limit in VLT_MODE - see above)
-#define I_DC_MAX        10              // [A] Maximum stage2 DC Link current limit for Commutation and Sinusoidal types (This is the final current protection. Above this value, current chopping is applied. To avoid this make sure that I_DC_MAX = I_MOT_MAX + 2A)
-#define N_MOT_MAX       500             // [rpm] Motor speed limit - enforced by '<S83>' back-calculation. See above.
+// IT IS IN THIS FIRMWARE'S HOT rpm. cf_speedCoef assumes 15 pole pairs and the
+// motors have 44, so everything n_mot touches reads 2.9333x high (see the
+// N_MOT_SCALE writeup in mb_protocol.h). 750 hot rpm is 26.8 TRUE rad/s,
+// 3.75 m/s.
+//
+// THE ABSOLUTE REV LIMIT OF THE MACHINE. Set once from what the hardware can
+// stand; it is NOT derived from the mainboard speed ceiling and does not move
+// when that is lowered. In normal operation it never fires.
+//
+// It is the only speed limit enforced off the mainboard, by the FOC model
+// itself. Everything else lives on one MCU downstream of one command path, so
+// whatever defeats one defeats them all. It is also the only thing bounding a
+// runaway: the mainboard voltage clamp carries load and acceleration allowances
+// that become SPEED when the load is absent, so an unloaded wheel at full clamp
+// overruns the commanded ceiling by several rad/s.
+//
+// static_asserts in side_controller.h bound it from both directions - the
+// software ceiling must stay 25% below it, and it must stay under what the
+// motor can reach on a full pack (~1200 hot rpm) or it is not a limit at all.
+// Raise it only if the mechanics genuinely tolerate more speed.
+#define N_MOT_MAX       750             // [rpm, HOT] Motor speed limit - enforced by '<S83>' back-calculation. See above.
 
 // ── Zero-command idle (TRQ_MODE only) ────────────────────────────────────────
 //
-// INERT ON THIS BRANCH, and left in place deliberately rather than deleted.
-// Its use site in Src/util.c is guarded by `#if (CTRL_MOD_REQ == TRQ_MODE)`,
-// so with VLT_MODE selected above it compiles out entirely.
+// INERT IN THIS BUILD. Its use site in Src/util.c is guarded by
+// `#if (CTRL_MOD_REQ == TRQ_MODE)`, so with VLT_MODE selected it compiles out.
 //
 // It exists because holding iq = 0 with a LIVE CURRENT LOOP is the worst
 // operating point for a hall FOC - deadtime injects a voltage error whose sign
@@ -484,45 +489,34 @@
   // #define SUPPORT_BUTTONS_LEFT       // use left sensor board cable for button inputs.  Disable DEBUG_SERIAL_USART2!
   // #define SUPPORT_BUTTONS_RIGHT      // use right sensor board cable for button inputs. Disable DEBUG_SERIAL_USART3!
 
-  // defines.h hall V/W pins restored to the swapped mapping validated on
-  // hardware via mainboard_motor_test (frog branch); commit 2ac03e8's
-  // "fork's original" unswapped mapping was wrong for this wiring and, under
-  // FOC_CTRL/SPD_MODE, produced screech+stall on both motors. main.c's
-  // pwmr sign branch was also swapped relative to that verified baseline
-  // and has been restored to match.
+  // defines.h uses a swapped hall V/W pin mapping, matching this hardware's
+  // wiring. The unswapped mapping produces screech and stall on both motors.
+  // main.c's pwmr sign branch is swapped to match.
 
-  // ── Speed-feedback sign — STILL REQUIRED IN TRQ_MODE ───────────────────
+  // ── Speed-feedback sign ────────────────────────────────────────────────
   //
-  // This was originally the fix for the SPD_MODE runaway (below), and it is
-  // tempting to assume it became irrelevant once the outer speed loop moved
-  // off this board. It did not. n_mot must stay correctly signed because:
+  // On this hardware's hall-vs-phase wiring permutation, the controller's hall
+  // direction-detection disagrees with the direction a positive Vq actually
+  // drives, so the reported n_mot has the wrong sign. This inverts the MEASURED
+  // speed only (Src/BLDC_controller.c, '<S17>/Divide11'), which is the only
+  // lever that decouples measurement from commutation.
   //
-  //   1. It is the ONLY overspeed guard in TRQ_MODE. n_max's back-calculation
-  //      ('<S82>') subtracts |n_mot| from n_max; with the sign wrong the
-  //      wheel accelerates unchecked. See the N_MOT_MAX note above.
-  //   2. It is the mainboard's outer velocity PI feedback, via
-  //      Feedback.speedL_meas / speedR_meas. An inverted feedback there
-  //      recreates exactly the positive-feedback runaway described below,
-  //      one level up.
-  //   3. It is what the odom_l/odom_r tick sign was aligned against.
+  // The sign matters for three things:
   //
-  // On this hardware's hall-vs-phase wiring permutation, the controller's
-  // hall direction-detection disagrees with the direction a positive
-  // r_inpTgt / Vq actually drives. That makes the SPD_MODE outer speed loop
-  // POSITIVE feedback (error = target - measured grows as the motor
-  // accelerates), which diverges for any cf_nKi > 0 and settles at an
-  // inverted, wrong-magnitude speed for cf_nKi == 0. This inverts the
-  // MEASURED speed only (Src/BLDC_controller.c, '<S17>/Divide11'), which is
-  // the only lever that decouples measurement from commutation.
+  //   1. The N_MOT_MAX back-calculation ('<S82>') subtracts |n_mot| from
+  //      n_max; with the sign wrong the wheel accelerates unchecked.
+  //   2. It is the mainboard outer velocity PI feedback, via
+  //      Feedback.speedL_meas / speedR_meas. Inverted there, the loop becomes
+  //      positive feedback and diverges.
+  //   3. It is what the odom_l/odom_r tick sign is aligned against.
   //
   // Do NOT use INVERT_L/R_DIRECTION for this. Those negate r_inpTgt, which
-  // negates the target AND the resulting rotation AND therefore n_mot - the
-  // relative sign is invariant, so they are a no-op for this bug (and were
-  // confirmed as such on hardware) while needlessly flipping the platform's
-  // physical polarity.
+  // negates the target AND the resulting rotation AND therefore n_mot, leaving
+  // the relative sign unchanged - a no-op for this, and it flips the platform
+  // physical polarity as a side effect.
   //
-  // If a future rewiring makes the two agree, comment this out; the symptom
-  // of having it backwards is the same runaway in the opposite direction.
+  // If a rewiring makes the two agree, comment this out; the symptom of having
+  // it backwards is a runaway in the opposite direction.
   #define N_MOT_MEAS_INVERT
 
   // #define INVERT_R_DIRECTION     // Invert rotation of right motor
