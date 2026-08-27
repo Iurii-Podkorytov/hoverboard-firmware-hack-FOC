@@ -303,14 +303,18 @@ P rtP_Left = {
   /* Variable: cf_nKp
    * Referenced by: '<S61>/cf_nKp'
    *
-   * Restored to stock. This was bisected down to 1208U while chasing the
-   * SPD_MODE runaway, but that runaway was a speed-feedback SIGN inversion
-   * (see N_MOT_MEAS_INVERT in Inc/config.h), which is unstable for any
-   * gain - so the bisection was measuring the wrong thing and never
-   * isolated gain magnitude as mattering. Re-tune from stock only if the
-   * loop actually misbehaves with the sign fixed.
+   * Halved from stock (4833U) to soften the standstill holding force: a
+   * SPD_MODE zero target is a servo setpoint, not "no power", so the wheel
+   * actively resists being pushed at a strength set by this gain. This is
+   * an untested starting point, not a bench-measured value - re-tune from
+   * here if the hold is still too stiff, or restore 4833U if tracking during
+   * actual driving gets noticeably mushy. (The earlier bisection down to
+   * 1208U while chasing the SPD_MODE runaway does not apply here - that
+   * runaway was a speed-feedback SIGN inversion, unstable for any gain, and
+   * never isolated gain magnitude as mattering; see N_MOT_MEAS_INVERT in
+   * Inc/config.h.)
    */
-  4833U,
+  2417U,
 
   /* Variable: cf_currFilt
    * Referenced by: '<S50>/cf_currFilt'
@@ -337,13 +341,16 @@ P rtP_Left = {
   /* Variable: cf_nKi
    * Referenced by: '<S61>/cf_nKi'
    *
-   * Restored to stock. The "every nonzero Ki eventually saturates, only the
-   * time scales" cliff seen during the runaway investigation is the exact
-   * signature of positive feedback (an integrator has infinite DC gain, so
-   * a sign-inverted loop diverges for every Ki > 0) - not a tuning
-   * boundary. Fixed at the source via N_MOT_MEAS_INVERT.
+   * Reduced from stock (251U) alongside cf_nKp, to soften standstill holding
+   * force. Cut less than cf_nKp: this is the term that removes steady-state
+   * droop while actually driving, and a zero'd integral term would leave a
+   * commanded speed permanently under-tracked under load. Re-tune independent
+   * of cf_nKp if needed. (The "every nonzero Ki eventually saturates" cliff
+   * from the SPD_MODE runaway investigation was a sign-inversion instability,
+   * not evidence against nonzero Ki in general - fixed at the source via
+   * N_MOT_MEAS_INVERT in Inc/config.h.)
    */
-  251U,
+  188U,
 
   /* Variable: cf_nKiLimProt
    * Referenced by:
