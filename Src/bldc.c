@@ -22,6 +22,7 @@
 * along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include <string.h>
 #include "stm32f1xx_hal.h"
 #include "defines.h"
 #include "setup.h"
@@ -67,6 +68,24 @@ static uint8_t  buzzerIdx   = 0;
 
 uint8_t        enable       = 0;        // initially motors are disabled for SAFETY
 static uint8_t enableFin    = 0;
+
+volatile uint8_t motErrClearReq = 0;    // set by usart_process_command (CMD_FLAG_CLEAR_MOTOR_ERR)
+
+/* Clear one motor's latched diagnostics error (F02_Diagnostics in
+ * BLDC_controller.c). The stall bit (z_errCode & 4) is OR'd back into its own
+ * raw condition through UnitDelay_DSTATE_e, so it never dequalifies on its
+ * own; hall errors (bits 0/1) dequalify after t_errDequal. Resets the output,
+ * its delay, and the debounce/edge-detector states to their init values
+ * (Debounce_Filter_Init initialises its counters to 0). If the motor is still
+ * blocked and driven, the stall re-qualifies after t_errQual (~0.24 s).
+ * Must run in this ISR, between controller steps. */
+static void clearMotorDiag(DW *dw, ExtY *y) {
+  dw->UnitDelay_DSTATE_e = 0;
+  dw->Merge_p            = false;
+  memset(&dw->Debounce_Filter_k, 0, sizeof(dw->Debounce_Filter_k));
+  memset(&dw->either_edge_i,     0, sizeof(dw->either_edge_i));
+  y->z_errCode           = 0;
+}
 
 static const uint16_t pwm_res  = 64000000 / 2 / PWM_FREQ; // = 2000
 
@@ -201,6 +220,13 @@ void DMA1_Channel1_IRQHandler(void) {
     return;
   }
   OverrunFlag = true;
+
+  /* Clear latched motor errors on request from the serial command */
+  if (motErrClearReq) {
+    clearMotorDiag(&rtDW_Left,  &rtY_Left);
+    clearMotorDiag(&rtDW_Right, &rtY_Right);
+    motErrClearReq = 0;
+  }
 
   /* Make sure to stop BOTH motors in case of an error */
   enableFin = enable && !rtY_Left.z_errCode && !rtY_Right.z_errCode;

@@ -134,6 +134,7 @@ typedef struct{
 #endif
   int16_t   batVoltage;
   int16_t   boardTemp;
+  uint16_t  errCodes;     // z_errCode: low byte = Left motor, high byte = Right motor
   uint16_t  cmdLed;
   uint16_t  checksum;
 } SerialFeedback;
@@ -542,6 +543,7 @@ int main(void) {
 #endif
         Feedback.batVoltage	    = (int16_t)batVoltageCalib;
         Feedback.boardTemp	    = (int16_t)board_temp_deg_c;
+        Feedback.errCodes       = (uint16_t)(rtY_Left.z_errCode | (rtY_Right.z_errCode << 8));
 
         #if defined(FEEDBACK_SERIAL_USART2)
           if(__HAL_DMA_GET_COUNTER(huart2.hdmatx) == 0) {
@@ -550,7 +552,7 @@ int main(void) {
 #ifdef ENABLE_ODOMETRY
                                            ^ Feedback.wheelR_cnt ^ Feedback.wheelL_cnt
 #endif
-                                           ^ Feedback.batVoltage ^ Feedback.boardTemp ^ Feedback.cmdLed);
+                                           ^ Feedback.batVoltage ^ Feedback.boardTemp ^ Feedback.errCodes ^ Feedback.cmdLed);
 
             HAL_UART_Transmit_DMA(&huart2, (uint8_t *)&Feedback, sizeof(Feedback));
           }
@@ -562,7 +564,7 @@ int main(void) {
 #ifdef ENABLE_ODOMETRY
                                            ^ Feedback.wheelR_cnt ^ Feedback.wheelL_cnt
 #endif
-                                           ^ Feedback.batVoltage ^ Feedback.boardTemp ^ Feedback.cmdLed);
+                                           ^ Feedback.batVoltage ^ Feedback.boardTemp ^ Feedback.errCodes ^ Feedback.cmdLed);
 
             HAL_UART_Transmit_DMA(&huart3, (uint8_t *)&Feedback, sizeof(Feedback));
           }

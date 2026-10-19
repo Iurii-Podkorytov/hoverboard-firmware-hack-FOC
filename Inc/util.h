@@ -39,10 +39,17 @@
       uint16_t  start;
       int16_t   steer;
       int16_t   speed;
+      uint16_t  flags;      // CMD_FLAG_* bits
       uint16_t  checksum;
     } SerialCommand;
   #endif
 #endif
+
+// SerialCommand.flags: clear both motors' latched diagnostics error
+// (z_errCode). The stall bit (4) latches itself in BLDC_controller.c and
+// otherwise only clears on a power cycle. Serviced in bldc.c's ISR.
+#define CMD_FLAG_CLEAR_MOTOR_ERR  0x0001
+extern volatile uint8_t motErrClearReq;
 #if defined(SIDEBOARD_SERIAL_USART2) || defined(SIDEBOARD_SERIAL_USART3)
     typedef struct{
       uint16_t  start;

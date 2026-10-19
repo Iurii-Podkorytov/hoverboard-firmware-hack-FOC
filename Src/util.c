@@ -1293,9 +1293,12 @@ void usart_process_command(SerialCommand *command_in, SerialCommand *command_out
   #else
   uint16_t checksum;
   if (command_in->start == SERIAL_START_FRAME) {
-    checksum = (uint16_t)(command_in->start ^ command_in->steer ^ command_in->speed);
+    checksum = (uint16_t)(command_in->start ^ command_in->steer ^ command_in->speed ^ command_in->flags);
     if (command_in->checksum == checksum) {
       *command_out = *command_in;
+      if (command_in->flags & CMD_FLAG_CLEAR_MOTOR_ERR) {
+        motErrClearReq = 1;             // Serviced in the motor control ISR (bldc.c)
+      }
       if (usart_idx == 2) {             // Sideboard USART2
         #ifdef CONTROL_SERIAL_USART2
         timeoutFlgSerial_L = 0;         // Clear timeout flag
